@@ -24,6 +24,13 @@ function isUniqueViolation(err: unknown): boolean {
   );
 }
 
+// Shared param validators (CONTRIBUTING: API changes ship with fastify schemas).
+const CUID = { type: "string", pattern: "^[a-z0-9]{1,64}$" };
+const NUM = { type: "string", pattern: "^[0-9]{1,9}$" };
+function paramsSchema(properties: Record<string, unknown>): { schema: { params: object } } {
+  return { schema: { params: { type: "object", properties } } };
+}
+
 interface VersionManifestMeta {
   artifactFormat?: "single" | "chunked";
   origin?: [number, number, number];
@@ -169,10 +176,13 @@ export async function processVersion(app: FastifyInstance, versionId: string): P
     // slice -> parallel shard conversion -> aggregate pipeline. The pipeline
     // writes the same contract artifacts (model.glb/chunks + meta.json) into
     // the version dir, so everything below is format-agnostic.
+    // The ticket-09 no-worker fallback (size >= native threshold but wasm
+    // anyway) must never run the plain single-thread path: presplit engages
+    // there too, closing the gap between the two thresholds.
     const usePresplit =
       engine === "wasm" &&
       app.config.presplitThresholdBytes > 0 &&
-      version.sizeBytes >= app.config.presplitThresholdBytes;
+      (version.sizeBytes >= app.config.presplitThresholdBytes || decision.note === "native-not-configured");
     const chunking =
       version.sizeBytes >= app.config.chunkingThresholdBytes
         ? { maxTrianglesPerChunk: app.config.chunkMaxTriangles }
@@ -338,7 +348,7 @@ export async function modelRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---- versions -----------------------------------------------------------
-  app.post("/models/:modelId/versions", async (request, reply) => {
+  app.post("/models/:modelId/versions", paramsSchema({ modelId: CUID }), async (request, reply) => {
     await requireProjectRole(app, request, "EDITOR");
     const { modelId } = request.params as { modelId: string };
     const model = await db.model.findUnique({ where: { id: modelId } });
@@ -516,7 +526,7 @@ export async function modelRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
-  app.put("/models/:modelId/uploads/:uploadId/parts/:part", async (request, reply) => {
+  app.put("/models/:modelId/uploads/:uploadId/parts/:part", paramsSchema({ modelId: CUID, uploadId: CUID, part: NUM }), async (request, reply) => {
     await requireProjectRole(app, request, "EDITOR");
     const { modelId, uploadId, part } = request.params as {
       modelId: string;
@@ -557,7 +567,7 @@ export async function modelRoutes(app: FastifyInstance): Promise<void> {
     return { part: partNo, received: data.byteLength };
   });
 
-  app.post("/models/:modelId/uploads/:uploadId/complete", async (request, reply) => {
+  app.post("/models/:modelId/uploads/:uploadId/complete", paramsSchema({ modelId: CUID, uploadId: CUID }), async (request, reply) => {
     await requireProjectRole(app, request, "EDITOR");
     const { modelId, uploadId } = request.params as { modelId: string; uploadId: string };
     const model = await db.model.findUnique({ where: { id: modelId } });
@@ -670,7 +680,7 @@ export async function modelRoutes(app: FastifyInstance): Promise<void> {
     return { version, meta: JSON.parse(buf.toString("utf8")) as VersionManifestMeta };
   }
 
-  app.get("/versions/:versionId/manifest", async (request, reply) => {
+  app.get("/versions/:versionId/manifest", paramsSchema({ versionId: CUID }), async (request, reply) => {
     await requireProjectRole(app, request, "VIEWER");
     const found = await readyVersionAndMeta(request);
     if (!found) return reply.code(404).send({ statusCode: 404, error: "NotFound", message: "version not found or not ready" });
@@ -699,7 +709,7 @@ export async function modelRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/versions/:versionId/chunks/:chunkId", async (request, reply) => {
+  app.get("/versions/:versionId/chunks/:chunkId", paramsSchema({ versionId: CUID, chunkId: NUM }), async (request, reply) => {
     await requireProjectRole(app, request, "VIEWER");
     const { chunkId } = request.params as { chunkId: string };
     if (!/^\d{1,9}$/.test(chunkId)) {
@@ -852,7 +862,7 @@ export async function modelRoutes(app: FastifyInstance): Promise<void> {
   // instant overview (and can select floors/elements) before any real chunk
   // loads. Tuples keep the bytes down: [expressID, storeyGuid, chunkId,
   // minX, minY, minZ, maxX, maxY, maxZ].
-  app.get("/versions/:versionId/proxy", async (request, reply) => {
+  app.get("/versions/:versionId/proxy", paramsSchema({ versionId: CUID }), async (request, reply) => {
     await requireProjectRole(app, request, "VIEWER");
     const { versionId } = request.params as { versionId: string };
     const version = await db.version.findUnique({ where: { id: versionId } });

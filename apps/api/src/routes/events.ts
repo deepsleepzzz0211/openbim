@@ -6,7 +6,21 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 
 export async function eventRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/versions/events", { schema: { hide: true } }, async (request: FastifyRequest, reply) => {
+  app.get(
+    "/versions/events",
+    {
+      schema: {
+        hide: true,
+        querystring: {
+          type: "object",
+          properties: {
+            token: { type: "string", minLength: 16, maxLength: 4096, pattern: "^[A-Za-z0-9-_.]+$" },
+            ids: { type: "string", maxLength: 2048 },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply) => {
     const { token, ids } = request.query as { token?: string; ids?: string };
     if (!token) {
       return reply.code(401).send({ statusCode: 401, error: "Unauthorized", message: "token query parameter required" });

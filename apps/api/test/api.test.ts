@@ -717,6 +717,21 @@ describe("chunked artifacts + manifest (ticket 05)", () => {
     manifest = man.json();
   });
 
+  it("rejects malformed route params and SSE query strings via fastify schemas", async () => {
+    const bad: Array<[string, string]> = [
+      ["GET", "/api/v1/versions/NOT-VALID_ID/manifest"],
+      ["GET", `/api/v1/versions/${cversionId}/chunks/${encodeURIComponent("!9")}`],
+      ["PUT", `/api/v1/models/${cmodelId}/uploads/abc123def/parts/NaN`],
+      ["POST", `/api/v1/models/${cmodelId}/uploads/${encodeURIComponent("!!bad")}/complete`],
+    ];
+    for (const [m, u] of bad) {
+      const res = await capp.inject({ method: m as never, url: u, headers: { authorization: `Bearer ${ctoken}` } });
+      expect(res.statusCode, `${m} ${u}`).toBe(400);
+    }
+    const ev = await capp.inject({ method: "GET", url: `/api/v1/versions/events?token=${encodeURIComponent("!!!not-a-jwt!!!")}` });
+    expect(ev.statusCode).toBe(400);
+  });
+
   afterAll(async () => {
     await capp.close();
   });
@@ -847,7 +862,7 @@ describe("chunked artifacts + manifest (ticket 05)", () => {
     expect(boxes.every((b: any[]) => b[2] === null)).toBe(true);
     const missing = await app.inject({
       method: "GET",
-      url: `/api/v1/versions/no-such-version/proxy`,
+      url: `/api/v1/versions/no000000000000000000000/proxy`, // well-formed cuid that cannot exist
       headers: { authorization: `Bearer ${alice.accessToken}` },
     });
     expect(missing.statusCode).toBe(404);

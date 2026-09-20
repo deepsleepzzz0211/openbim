@@ -24,8 +24,10 @@ IfcOpenShell 是 LGPL 许可。通过"独立进程 + HTTP 作业协议 + 只交�
    历史版本（engine 为 NULL）一律视为 `wasm`。引擎在 `Version.engine` 落库，
    转换失败也记录（重试保持同一引擎）。
 3. **未配置 worker 时降级**：若 `NATIVE_WORKER_URL` 为空，超限任务仍走 `wasm`
-   并打 warn 日志（保证小规模自托管可用）；已配置 worker 但作业失败时**不会**
-   静默切回 wasm，而是 `FAILED` + 明确 errorCode（规则 2）。
+   并打 warn 日志（保证小规模自托管可用），但该作业**强制走 presplit 分片管线**
+   （无视 `PRESPLIT_THRESHOLD_BYTES`），确保 wasm 侧不存在"超限却单线程裸转"的
+   空档；已配置 worker 但作业失败时**不会**静默切回 wasm，而是 `FAILED` + 明确
+   errorCode（规则 2）。
 
 ## 环境变量（API）
 

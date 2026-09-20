@@ -50,21 +50,51 @@ async function rawRequest(method: string, url: string, body?: unknown, auth = tr
   return res;
 }
 
+/**
+ * The backend rotates refresh tokens single-use: a second request replaying
+ * the same token revokes the whole session. Concurrent 401s (e.g. parallel
+ * chunk downloads) must therefore share ONE in-flight refresh, not each fire
+ * their own.
+ */
+let refreshInFlight: Promise<boolean> | null = null;
+
+function clearTokens(): void {
+  tokens = null;
+  persistTokens();
+}
+
+async function refreshTokens(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  const refreshToken = tokens?.refreshToken;
+  if (!refreshToken) return false;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(BASE + "/auth/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refreshToken }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      tokens = { accessToken: data.accessToken, refreshToken: data.refreshToken };
+      persistTokens();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
 async function request<T>(method: string, url: string, body?: unknown, retry = true): Promise<T> {
   const res = await rawRequest(method, url, body);
   if (res.status === 401 && retry && tokens?.refreshToken) {
-    const refreshed = await fetch(BASE + "/auth/refresh", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ refreshToken: tokens.refreshToken }),
-    });
-    if (refreshed.ok) {
-      const data = await refreshed.json();
-      tokens = { accessToken: data.accessToken, refreshToken: data.refreshToken };
-      persistTokens();
+    if (await refreshTokens()) {
       return request<T>(method, url, body, false);
     }
-    tokens = null;
+    clearTokens();
     onUnauthorized?.();
   }
   if (!res.ok) {
@@ -191,20 +221,13 @@ async function uploadVersionChunked(
 export async function downloadBinary(url: string): Promise<ArrayBuffer> {
   const res = await rawRequest("GET", url);
   if (res.status === 401 && tokens?.refreshToken) {
-    const refreshed = await fetch(BASE + "/auth/refresh", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ refreshToken: tokens.refreshToken }),
-    });
-    if (refreshed.ok) {
-      const data = await refreshed.json();
-      tokens = { accessToken: data.accessToken, refreshToken: data.refreshToken };
-      persistTokens();
+    if (await refreshTokens()) {
       const retry = await rawRequest("GET", url);
       if (retry.ok) return retry.arrayBuffer();
+    } else {
+      clearTokens();
+      onUnauthorized?.();
     }
-    tokens = null;
-    onUnauthorized?.();
   }
   if (!res.ok) throw new ApiError(res.status, `download failed: ${url}`);
   return res.arrayBuffer();

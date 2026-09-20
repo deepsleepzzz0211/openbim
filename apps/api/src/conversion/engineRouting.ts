@@ -5,7 +5,9 @@
  *  1. Size route: sources at/above the wasm-safety threshold go to the native
  *     IfcOpenShell worker container (separate process => LGPL boundary and no
  *     WASM heap ceiling). When no worker is configured we degrade to wasm with
- *     a note so small/self-hosted deployments keep working.
+ *     a note so small/self-hosted deployments keep working; the caller then
+ *     runs the presplit shard pipeline for that job regardless of the presplit
+ *     threshold, so oversized sources never take the plain wasm path.
  *  2. No mixing: one model keeps the engine of its newest existing version,
  *     otherwise diffs/clashes would compare geometry from two engines. Legacy
  *     versions (engine = null, pre-ticket-09) count as "wasm".

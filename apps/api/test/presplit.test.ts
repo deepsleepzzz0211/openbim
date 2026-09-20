@@ -238,3 +238,89 @@ describe("presplitThresholdBytes config", () => {
     expect(loadConfig({ PRESPLIT_THRESHOLD_BYTES: "abc" }).presplitThresholdBytes).toBe(512 * 1024 * 1024);
   });
 });
+
+describe("no-worker fallback also engages presplit (review fix: T09 gap)", () => {
+  const DATA_DIR = path.join(__dirname, "tmp-data-fallback");
+  const DB_URL = `file:${path.join(DATA_DIR, "test.db").replace(/\\/g, "/")}`;
+  let app: FastifyInstance;
+  let token = "";
+  let modelId = "";
+
+  beforeAll(async () => {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    execSync(`pnpm exec prisma db push --skip-generate`, {
+      cwd: path.join(__dirname, ".."),
+      env: { ...process.env, DATABASE_URL: DB_URL },
+      stdio: "ignore",
+    });
+    const config = loadConfig({
+      ...process.env,
+      DATABASE_URL: DB_URL,
+      DATA_DIR,
+      JWT_SECRET: "test-secret",
+      CONVERSION_MODE: "inline",
+      NATIVE_THRESHOLD_BYTES: "1024", // sample (5 KB) exceeds the wasm-safety threshold...
+      PRESPLIT_THRESHOLD_BYTES: String(100 * 1024 * 1024), // ...but is far below the presplit one
+    });
+    const db = createDb(config.databaseUrl);
+    const blobs = new LocalDiskBlobStore(config.dataDir);
+    const conversion = createConversionService("inline", 2, null);
+    app = await buildApp({ config, db, blobs, conversion, logger: false });
+    const reg = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/register",
+      payload: { email: "fallback@test.local", name: "FB", password: "password123" },
+    });
+    token = reg.json().accessToken;
+    const p = await inject("POST", "/api/v1/projects", { name: "FB", key: "fallback" });
+    modelId = (await inject("POST", `/api/v1/projects/${p.json().project.id}/models`, { name: "M" })).json().model.id;
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  async function inject(method: string, url: string, payload?: unknown) {
+    return app.inject({
+      method: method as never,
+      url,
+      headers: { authorization: `Bearer ${token}` },
+      ...(payload === undefined ? {} : { payload: payload as never }),
+    });
+  }
+
+  it("runs the shard pipeline for over-threshold sources when no native worker is configured", async () => {
+    const shardEvents: Array<{ shards?: { done: number; total: number } }> = [];
+    const listener = (e: { shards?: { done: number; total: number } }) => shardEvents.push(e);
+    app.events.on("version", listener as never);
+    try {
+      const boundary = "----openbimfallback" + Date.now();
+      const head = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="fb.ifc"\r\nContent-Type: application/octet-stream\r\n\r\n`
+      );
+      const body = Buffer.concat([head, SAMPLE, Buffer.from(`\r\n--${boundary}--\r\n`)]);
+      const res = await app.inject({
+        method: "POST" as never,
+        url: `/api/v1/models/${modelId}/versions`,
+        headers: { authorization: `Bearer ${token}`, "content-type": `multipart/form-data; boundary=${boundary}` },
+        payload: body as never,
+      });
+      expect(res.statusCode).toBe(202);
+      const versionId = res.json().version.id as string;
+      let v: { status: string; storageKey?: string };
+      for (;;) {
+        v = (await inject("GET", `/api/v1/versions/${versionId}`)).json().version;
+        if (v.status === "READY" || v.status === "FAILED") break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(v.status).toBe("READY");
+      expect(v.engine).toBe("wasm"); // degraded route
+      expect(shardEvents.some((e) => e.shards)).toBe(true); // shard pipeline ran despite big threshold
+      const meta = JSON.parse(fs.readFileSync(path.join(DATA_DIR, v.storageKey!, "meta.json"), "utf8"));
+      expect(meta.artifactFormat).toBe("chunked");
+    } finally {
+      app.events.off("version", listener as never);
+    }
+  });
+});
