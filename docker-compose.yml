@@ -1,0 +1,69 @@
+# OpenBIM Hub — one-command self-hosting (web + api + native conversion worker + SQLite volume).
+# For a PostgreSQL/S3 production topology see docs/deployment.md.
+#
+#   docker compose up --build
+#   web: http://localhost:3000   api: http://localhost:3001
+#
+# Engine routing (docs/conversion-engines.md): IFC sources >=
+# NATIVE_THRESHOLD_BYTES (default 256 MiB) are converted by the
+# IfcOpenShell worker container; everything else stays on the wasm pool.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: api
+    environment:
+      # SQLite lives on the persistent volume; swap to PostgreSQL per docs/deployment.md
+      DATABASE_URL: file:/data/openbim-hub/app.db
+      DATA_DIR: /data/blobs
+      JWT_SECRET: ${JWT_SECRET:-please-change-me-in-production}
+      CONVERSION_MODE: worker
+      NATIVE_WORKER_URL: http://ifc-worker:8090
+      NATIVE_WORKER_TOKEN: ${WORKER_TOKEN:-}
+      LOG_LEVEL: info
+    volumes:
+      - hubdata:/data
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+
+  # Native IfcOpenShell conversion container (ticket 09). Separate image and
+  # process => LGPL boundary. It shares the blob volume mounted at the SAME
+  # path as the API (/data), so jobs exchange paths, never bytes.
+  # Resource ceilings are documented defaults; raise both for very large sites.
+  ifc-worker:
+    build:
+      context: .
+      dockerfile: docker/ifcopenshell-worker/Dockerfile
+    environment:
+      WORKER_TOKEN: ${WORKER_TOKEN:-}
+      IFC_WORKER_THREADS: "4"
+      MAX_CONCURRENT_JOBS: "1"
+    volumes:
+      - hubdata:/data
+    expose:
+      - "8090"
+    mem_limit: 6g
+    cpus: 4
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/health').read(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: web
+    depends_on:
+      - api
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  hubdata:

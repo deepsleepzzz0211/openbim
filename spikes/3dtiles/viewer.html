@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>OpenBIM Hub - 3D Tiles 1.1 spike viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html, body { margin: 0; height: 100%; background: #101418; color: #dde; font: 13px/1.4 system-ui, sans-serif; }
+  #cesium { position: absolute; inset: 0; }
+  #panel {
+    position: absolute; top: 8px; left: 8px; z-index: 10; width: 340px; max-height: calc(100% - 16px);
+    overflow: auto; padding: 10px 12px; background: rgba(12,16,20,.86); border: 1px solid #345; border-radius: 8px;
+  }
+  #panel h1 { font-size: 14px; margin: 0 0 6px; }
+  #panel label { display: block; margin: 6px 0 2px; color: #9ab; }
+  #panel select, #panel input { width: 100%; box-sizing: border-box; background: #1a222b; color: #dee; border: 1px solid #345; border-radius: 4px; padding: 3px 5px; }
+  #stats { margin-top: 8px; white-space: pre; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #bfe; }
+  #pick { margin-top: 8px; white-space: pre-wrap; color: #fda; min-height: 20px; }
+  a { color: #8cf; }
+</style>
+<!-- Standard open-source renderer: CesiumJS (native OGC 3D Tiles 1.1 support).
+     Serve this folder over HTTP (e.g. `python -m http.server -d spikes/3dtiles/out 8099`), file:// is blocked. -->
+<script>window.CESIUM_BASE_URL = "https://cdn.jsdelivr.net/npm/cesium@1.120/Build/Cesium/";</script>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.120/Build/Cesium/Cesium.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.120/Build/Cesium/Widgets/widgets.css" />
+</head>
+<body>
+<div id="cesium"></div>
+<div id="panel">
+  <h1>3D Tiles 1.1 spike - 流式加载观察</h1>
+  <label>模型
+    <select id="model">
+      <option value="duplex">duplex (Duplex_A, 2.4 MB IFC)</option>
+      <option value="sample-building">sample-building</option>
+      <option value="landscaping">landscaping (1 MB IFC)</option>
+    </select>
+  </label>
+  <label>maximumMemoryUsage (MB) <input id="mem" type="number" value="512" min="16" step="16"></label>
+  <label>screenSpaceError <input id="sse" type="number" value="16" min="0.5" step="0.5"></label>
+  <div id="stats">loading…</div>
+  <div id="pick">点击瓦片:显示 tile -> chunkId -> GUID 映射(属性侧挂接路径)</div>
+</div>
+<script type="module">
+const params = new URLSearchParams(location.search);
+let current = null, currentMeta = null;
+
+const imagery = await Cesium.SingleTileImageryProvider.fromUrl(
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+  { tileWidth: 1, tileHeight: 1 }
+);
+const viewer = new Cesium.Viewer("cesium", {
+  baseLayer: new Cesium.ImageryLayer(imagery),
+  baseLayerPicker: false, animation: false, timeline: false, geocoder: false,
+  homeButton: false, sceneModePicker: false, navigationHelpButton: false, fullscreenButton: false,
+  infoBox: false, selectionIndicator: false,
+});
+viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#22333f");
+viewer.scene.globe.show = false; // pure model content, no globe interference
+
+function guidsForChunk(meta, chunkId) {
+  // same hook the attribute API uses: manifest tile/chunk -> global buckets -> ranges -> element GUIDs
+  const entry = meta.chunks.find((c) => c.id === chunkId);
+  if (!entry) return [];
+  const out = [];
+  for (const b of entry.buckets) for (const r of (meta.buckets[b]?.ranges ?? [])) {
+    const el = meta.elements[String(r.expressID)];
+    if (el) out.push(el.guid);
+  }
+  return [...new Set(out)];
+}
+
+async function load(name) {
+  if (current) viewer.scene.primitives.remove(current), (current = null);
+  const base = `${name}/tileset`; // served from out/: <name>/tileset/tileset.json
+  currentMeta = await (await fetch(`${name}/artifact/meta.json`)).json();
+  const tileset = await Cesium.Cesium3DTileset.fromUrl(`${base}/tileset.json`, {
+    maximumMemoryUsage: Number(document.getElementById("mem").value),
+    screenSpaceError: Number(document.getElementById("sse").value),
+    debugShowBoundingVolume: false,
+  });
+  viewer.scene.primitives.add(tileset);
+  current = tileset;
+  await viewer.zoomTo(tileset, new Cesium.HeadingPitchRange(0.6, -0.45, 0));
+}
+
+const statsEl = document.getElementById("stats");
+function fmt(o) {
+  return Object.entries(o ?? {})
+    .filter(([, v]) => typeof v === "number")
+    .map(([k, v]) => `${k}=${v > 1048576 ? (v / 1048576).toFixed(1) + "MB" : v}`)
+    .join("  ");
+}
+function tick() {
+  requestAnimationFrame(tick);
+  if (!current) return;
+  statsEl.textContent =
+    `stats: ${fmt(current.stats)}\nmemory: ${fmt(current.memoryStats)}\nrenderError=${viewer.renderError.toFixed(2)} SSE=${current.screenSpaceError}`;
+}
+requestAnimationFrame(tick);
+
+viewer.screenSpaceEventHandler.setInputAction(async (movement) => {
+  const picked = viewer.scene.pick(movement.position);
+  const out = document.getElementById("pick");
+  if (!Cesium.defined(picked)) {
+    out.textContent = "未命中瓦片内容";
+    return;
+  }
+  // scene.pick on tile content returns the Cesium3DTileContent (or a Feature
+  // wrapping it); both expose the content uri we map back to the chunk id
+  const uri = String(picked.url ?? picked.tileContent?.url ?? picked.content?.url ?? "");
+  const id = Number((uri.match(/tiles\/(\d+)\.glb/) ?? [])[1]);
+  const guids = Number.isInteger(id) ? guidsForChunk(currentMeta, id) : [];
+  out.textContent =
+    `tile content: ${uri}\nchunkId=${id}\nGUID count=${guids.length}\n` +
+    guids.slice(0, 6).map((g) => `  ${g}`).join("\n") +
+    (guids.length > 6 ? `\n  … (${guids.length - 6} more; GET /attributes?guid= 逐个可查)` : "");
+}, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+const sel = document.getElementById("model");
+sel.value = params.get("model") ?? "duplex";
+sel.addEventListener("change", () => load(sel.value).catch((e) => (statsEl.textContent = String(e))));
+document.getElementById("mem").addEventListener("change", () => load(sel.value));
+document.getElementById("sse").addEventListener("change", () => load(sel.value));
+await load(sel.value).catch((e) => (statsEl.textContent = "load failed: " + e));
+</script>
+</body>
+</html>

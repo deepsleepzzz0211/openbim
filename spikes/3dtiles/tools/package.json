@@ -1,0 +1,7 @@
+{
+  "name": "obh-3dtiles-spike-tools",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": { "3d-tiles-validator": "0.6.1" },
+  "overrides": { "sharp": "0.33.5" }
+}

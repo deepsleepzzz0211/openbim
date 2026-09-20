@@ -1,0 +1,25 @@
+OpenBIM Hub
+Copyright 2026 OpenBIM Hub contributors
+
+This product includes software developed as part of the OpenBIM Hub project,
+licensed under the Apache License, Version 2.0.
+
+Third-party components (carried by their respective licenses):
+
+- web-ifc 0.0.77 (MPL-2.0) — ThatOpen/engine — IFC parsing and geometry
+  generation (WASM). https://github.com/ThatOpen/engine_web-components
+- three.js (MIT) — 3D rendering. https://github.com/mrdoob/three.js
+- Fastify and @fastify/* plugins (MIT) — HTTP framework.
+- Prisma & @prisma/client (Apache-2.0) — ORM/migrations.
+- Ant Design (MIT) — UI components.
+- React (MIT) — UI runtime.
+- Vite (MIT) — build tooling.
+- JSZip (MIT OR GPL-3.0) — BCF zip packaging.
+- bcryptjs (MIT/BSD-like, see package) — password hashing.
+- pino (MIT) — structured logging.
+
+Samples:
+- samples/slab-standard-case.ifc and samples/tessellation.ifc originate from
+  the opensourceBIM TestFiles collection (buildingSMART-derived IFC4 samples).
+- samples/sample-building.ifc and samples/rac-basic.ifc usage in CI/tests is
+  for interoperability testing only.

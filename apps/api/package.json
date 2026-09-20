@@ -1,0 +1,47 @@
+{
+  "name": "@openbim-hub/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenBIM Hub API server (Fastify + Prisma + web-ifc conversion workers)",
+  "license": "Apache-2.0",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "pnpm run build && node dist/server.js",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "prisma:migrate": "prisma migrate dev",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\""
+  },
+  "prisma": {
+    "schema": "prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@fastify/jwt": "^9.0.1",
+    "@fastify/multipart": "^9.0.1",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/static": "^8.0.3",
+    "@fastify/swagger": "^9.2.1",
+    "@fastify/swagger-ui": "^5.2.0",
+    "@openbim-hub/bcf": "workspace:*",
+    "@openbim-hub/ifc": "workspace:*",
+    "@prisma/client": "^6.2.0",
+    "bcryptjs": "^2.4.3",
+    "fastify": "^5.2.0",
+    "pino": "^9.6.0",
+    "prom-client": "^15.1.3"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.10.0",
+    "jszip": "^3.10.1",
+    "prisma": "^6.2.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

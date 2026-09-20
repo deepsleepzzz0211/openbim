@@ -1,0 +1,69 @@
+name: Engine parity (manual)
+
+# Dual-engine consistency regression (ticket 09). Manual trigger to start;
+# promote to a schedule once the first runs are green.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "restrict to one sample file name (e.g. Duplex_A_20110907.ifc)"
+        required: false
+        default: ""
+      tri-tol:
+        description: "triangle count relative tolerance"
+        required: false
+        default: "0.15"
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install (js)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build wasm engine package
+        run: pnpm --filter @openbim-hub/ifc build
+
+      - name: Install (native engine)
+        run: pip install "ifcopenshell>=0.7,<0.9"
+
+      - name: Start native conversion worker
+        run: |
+          cd docker/ifcopenshell-worker
+          IFC_WORKER_THREADS=2 nohup python worker.py > ../../worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            sleep 1
+            if curl -sf http://127.0.0.1:8090/health > /dev/null; then exit 0; fi
+          done
+          echo "worker did not come up:"; cat ../../worker.log; exit 1
+
+      - name: Run parity over samples/complex
+        env:
+          PARITY_TRI_TOL: ${{ github.event.inputs.tri-tol }}
+        run: |
+          if [ -n "${{ github.event.inputs.only }}" ]; then
+            node scripts/engine-parity.mjs --native http://127.0.0.1:8090 --only "${{ github.event.inputs.only }}"
+          else
+            node scripts/engine-parity.mjs --native http://127.0.0.1:8090
+          fi
+
+      - name: Worker log on failure
+        if: failure()
+        run: cat worker.log || true

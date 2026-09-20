@@ -1,0 +1,257 @@
+// OpenBIM Hub database schema.
+// Dev/profile: SQLite (zero-dependency). For production scale switch the
+// provider to "postgresql" — the schema is written with portable types only.
+// See docs/deployment.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum PlatformRole {
+  ADMIN
+  USER
+}
+
+enum ProjectRole {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+enum VersionStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum IssueStatus {
+  OPEN
+  CLOSED
+}
+
+enum IssuePriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  name         String
+  passwordHash String
+  role         PlatformRole @default(USER)
+  createdAt    DateTime     @default(now())
+
+  refreshTokens    RefreshToken[]
+  ownedProjects    Project[]        @relation("ProjectCreator")
+  memberships      ProjectMember[]
+  createdVersions  Version[]        @relation("VersionCreator")
+  issues           Issue[]
+  auditLogs        AuditLog[]
+  issueComments    IssueComment[]
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  name        String
+  description String   @default("")
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy User            @relation("ProjectCreator", fields: [createdById], references: [id])
+  members   ProjectMember[]
+  models    Model[]
+  issues    Issue[]
+  auditLogs AuditLog[]
+  contentBlobs ContentBlob[]
+}
+
+model ProjectMember {
+  projectId String
+  userId    String
+  role      ProjectRole @default(VIEWER)
+  createdAt DateTime    @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+}
+
+model Model {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  description String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions Version[]
+  uploadSessions UploadSession[]
+
+  @@index([projectId])
+}
+
+model Version {
+  id           String        @id @default(cuid())
+  modelId      String
+  versionNumber Int
+  status       VersionStatus @default(PENDING)
+  progress     Int           @default(0)
+  errorCode    String?
+  schema       String?
+  statsJson    String?
+  /// JSON [x,y,z]: world metres (Y-up) the conversion subtracted from vertices
+  originJson   String?
+  /// JSON ConversionCrs: projected CRS / EPSG / map conversion of the source file
+  crsJson      String?
+  storageKey   String
+  originalName String
+  sizeBytes    Int
+  sha256       String
+  /// Triangulation engine that produced this version's artifacts ("wasm" | "native").
+  /// One model never mixes engines: newer versions inherit the previous engine (ticket 09).
+  engine       String?
+  createdById  String
+  createdAt    DateTime      @default(now())
+
+  model      Model    @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  createdBy  User     @relation("VersionCreator", fields: [createdById], references: [id])
+  elements   Element[]
+  blob       ContentBlob? @relation(fields: [blobId], references: [id], onDelete: SetNull)
+  blobId     String?
+
+  @@unique([modelId, versionNumber])
+  @@index([status])
+  @@index([blobId])
+}
+
+/// Content-addressed original IFC bytes, deduplicated per project.
+/// refCount is incremented for every Version that links a blob and
+/// decremented on version delete; the physical file is removed at zero.
+model ContentBlob {
+  id         String   @id @default(cuid())
+  projectId  String
+  sha256     String
+  storageKey String
+  sizeBytes  Int
+  refCount   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions Version[]
+
+  @@unique([projectId, sha256])
+  @@index([projectId])
+}
+
+model UploadSession {
+  id         String   @id @default(cuid())
+  modelId    String
+  fileName   String
+  partSize   Int
+  partsTotal Int
+  createdAt  DateTime @default(now())
+
+  model Model @relation(fields: [modelId], references: [id], onDelete: Cascade)
+}
+
+model Element {
+  id             String  @id @default(cuid())
+  versionId      String
+  expressID      Int
+  guid           String
+  ifcType        String
+  name           String
+  storeyGuid     String?
+  attributesJson String?
+  psetsJson      String?
+  bboxJson       String?
+  /// manifest chunk holding this element's geometry (ticket 05); null for
+  /// single-format artifacts and geometry-less elements
+  chunkId        Int?
+
+  version Version @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, expressID])
+  @@index([versionId, ifcType])
+  @@index([versionId, storeyGuid])
+  @@index([versionId, guid])
+}
+
+model Issue {
+  id           String        @id @default(cuid())
+  guid        String        @unique
+  projectId   String
+  title       String
+  description String        @default("")
+  status      IssueStatus   @default(OPEN)
+  priority    IssuePriority @default(NORMAL)
+  viewpointJson String?
+  snapshotKey   String?
+  authorId    String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author   User           @relation(fields: [authorId], references: [id])
+  comments IssueComment[]
+
+  @@index([projectId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String
+  projectId String?
+  metaJson  String?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model IssueComment {
+  id       String   @id @default(cuid())
+  issueId  String
+  authorId String
+  body     String
+  createdAt DateTime @default(now())
+
+  issue  Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  author User  @relation(fields: [authorId], references: [id])
+
+  @@index([issueId])
+}

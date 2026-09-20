@@ -1,0 +1,28 @@
+{
+  "name": "@openbim-hub/bcf",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BCF 2.1 (BIM Collaboration Format) writer for OpenBIM Hub",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
+    "test:mutation": "stryker run"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.11.1",
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

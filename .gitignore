@@ -1,0 +1,27 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.env
+.env.local
+data/
+uploads/
+coverage/
+*.log
+.DS_Store
+
+.stryker-tmp/
+reports/mutation/
+
+# workstream scratch artifacts (keep on disk, never commit)
+/tmp-e2e/
+/tmp-meshopt-report/
+/scratch/
+/spikes/3dtiles/out/
+/engine_web-ifc-0.77/
+/wifc.tar.gz
+/wiftree.json
+/wa.ts
+/wl.cpp
+/ww.cpp
+/scratch-origin-experiment*

@@ -1,0 +1,28 @@
+{
+  "name": "@openbim-hub/ifc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IFC parsing and conversion library for OpenBIM Hub: web-ifc based IFC -> glTF(GLB) + metadata pipeline",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
+    "test:mutation": "stryker run"
+  },
+  "dependencies": {
+    "meshoptimizer": "^1.1.1",
+    "web-ifc": "0.0.77"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
