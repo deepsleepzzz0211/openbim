@@ -153,20 +153,31 @@ export async function uploadVersion(
   }
   const form = new FormData();
   form.append("file", file, file.name);
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${BASE}/models/${modelId}/versions`);
-    xhr.setRequestHeader("authorization", `Bearer ${tokens?.accessToken ?? ""}`);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
-    };
-    xhr.onload = () => {
-      if (xhr.status === 202) resolve(JSON.parse(xhr.responseText));
-      else reject(new ApiError(xhr.status, xhr.responseText || xhr.statusText));
-    };
-    xhr.onerror = () => reject(new ApiError(0, "network error"));
-    xhr.send(form);
-  });
+  const send = (): Promise<{ status: number; text: string }> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${BASE}/models/${modelId}/versions`);
+      xhr.setRequestHeader("authorization", `Bearer ${tokens?.accessToken ?? ""}`);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
+      xhr.onerror = () => reject(new ApiError(0, "network error"));
+      xhr.send(form);
+    });
+  let res = await send();
+  // Access tokens are short-lived and this path bypasses request()'s refresh;
+  // a stale token must not kill the upload — one single-flight refresh + retry.
+  if (res.status === 401 && tokens?.refreshToken) {
+    if (await refreshTokens()) {
+      res = await send();
+    } else {
+      clearTokens();
+      onUnauthorized?.();
+    }
+  }
+  if (res.status !== 202) throw new ApiError(res.status, res.text || "upload failed");
+  return JSON.parse(res.text);
 }
 
 const PART_SIZE = 16 * 1024 * 1024;
