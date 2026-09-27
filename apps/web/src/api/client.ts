@@ -1,47 +1,14 @@
-/** Minimal API client with automatic access-token refresh. */
+/** Minimal API client. Token state and the 401 single-flight refresh protocol live in authTransport. */
+import { ApiError, BASE, getAccessToken, setTokens, setUnauthorizedHandler, withAuthRetry } from "./authTransport";
 
-const BASE = "/api/v1";
-
-interface Tokens {
-  accessToken: string;
-  refreshToken: string | null;
-}
-
-let tokens: Tokens | null = null;
-let onUnauthorized: (() => void) | null = null;
-
-/** Persist tokens so a refresh survives reloads (called on every rotation). */
-function persistTokens(): void {
-  if (tokens) {
-    localStorage.setItem("obh.tokens", JSON.stringify(tokens));
-  } else {
-    localStorage.removeItem("obh.tokens");
-  }
-}
-
-export function setTokens(t: Tokens | null): void {
-  tokens = t;
-  persistTokens();
-}
-
-export function getAccessToken(): string | null {
-  return tokens?.accessToken ?? null;
-}
-
-export function setUnauthorizedHandler(fn: () => void): void {
-  onUnauthorized = fn;
-}
-
-export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message);
-  }
-}
+export { setTokens, setUnauthorizedHandler, getAccessToken };
+export { ApiError };
 
 async function rawRequest(method: string, url: string, body?: unknown, auth = true): Promise<Response> {
   const headers: Record<string, string> = {};
   if (body !== undefined && !(body instanceof FormData)) headers["content-type"] = "application/json";
-  if (auth && tokens?.accessToken) headers["authorization"] = `Bearer ${tokens.accessToken}`;
+  const token = getAccessToken();
+  if (auth && token) headers["authorization"] = `Bearer ${token}`;
   const res = await fetch(BASE + url, {
     method,
     headers,
@@ -50,64 +17,39 @@ async function rawRequest(method: string, url: string, body?: unknown, auth = tr
   return res;
 }
 
-/**
- * The backend rotates refresh tokens single-use: a second request replaying
- * the same token revokes the whole session. Concurrent 401s (e.g. parallel
- * chunk downloads) must therefore share ONE in-flight refresh, not each fire
- * their own.
- */
-let refreshInFlight: Promise<boolean> | null = null;
-
-function clearTokens(): void {
-  tokens = null;
-  persistTokens();
+/** Best-effort read of the backend's error message off a 401 response body. */
+async function messageOf(res: Response): Promise<string | undefined> {
+  try {
+    return (await res.json()).message;
+  } catch {
+    return undefined;
+  }
 }
 
-async function refreshTokens(): Promise<boolean> {
-  if (refreshInFlight) return refreshInFlight;
-  const refreshToken = tokens?.refreshToken;
-  if (!refreshToken) return false;
-  refreshInFlight = (async () => {
-    try {
-      const res = await fetch(BASE + "/auth/refresh", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ refreshToken }),
-      });
-      if (!res.ok) return false;
-      const data = await res.json();
-      tokens = { accessToken: data.accessToken, refreshToken: data.refreshToken };
-      persistTokens();
-      return true;
-    } catch {
-      return false;
-    } finally {
-      refreshInFlight = null;
-    }
-  })();
-  return refreshInFlight;
+/** Same, for XHR response text. */
+function messageFromText(text: string): string | undefined {
+  try {
+    return JSON.parse(text).message;
+  } catch {
+    return undefined;
+  }
 }
 
-async function request<T>(method: string, url: string, body?: unknown, retry = true): Promise<T> {
-  const res = await rawRequest(method, url, body);
-  if (res.status === 401 && retry && tokens?.refreshToken) {
-    if (await refreshTokens()) {
-      return request<T>(method, url, body, false);
+async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+  return withAuthRetry(async () => {
+    const res = await rawRequest(method, url, body);
+    if (res.status === 401) return { auth: "failed", message: await messageOf(res) };
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        message = (await res.json()).message ?? message;
+      } catch {
+        /* keep statusText */
+      }
+      throw new ApiError(res.status, message);
     }
-    clearTokens();
-    onUnauthorized?.();
-  }
-  if (!res.ok) {
-    let message = res.statusText;
-    try {
-      const err = await res.json();
-      message = err.message ?? message;
-    } catch {
-      /* keep statusText */
-    }
-    throw new ApiError(res.status, message);
-  }
-  return res.json() as Promise<T>;
+    return { auth: "ok", status: res.status, value: (await res.json()) as T };
+  });
 }
 
 export const api = {
@@ -157,7 +99,7 @@ export async function uploadVersion(
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${BASE}/models/${modelId}/versions`);
-      xhr.setRequestHeader("authorization", `Bearer ${tokens?.accessToken ?? ""}`);
+      xhr.setRequestHeader("authorization", `Bearer ${getAccessToken() ?? ""}`);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
       };
@@ -165,38 +107,42 @@ export async function uploadVersion(
       xhr.onerror = () => reject(new ApiError(0, "network error"));
       xhr.send(form);
     });
-  let res = await send();
-  // Access tokens are short-lived and this path bypasses request()'s refresh;
-  // a stale token must not kill the upload — one single-flight refresh + retry.
-  if (res.status === 401 && tokens?.refreshToken) {
-    if (await refreshTokens()) {
-      res = await send();
-    } else {
-      clearTokens();
-      onUnauthorized?.();
-    }
-  }
-  if (res.status !== 202) throw new ApiError(res.status, res.text || "upload failed");
-  return JSON.parse(res.text);
+  return withAuthRetry(async () => {
+    const res = await send();
+    if (res.status === 401) return { auth: "failed", message: messageFromText(res.text) };
+    if (res.status !== 202) throw new ApiError(res.status, res.text || "upload failed");
+    return { auth: "ok", status: res.status, value: JSON.parse(res.text) as { version: { id: string; status: string } } };
+  });
 }
 
 const PART_SIZE = 16 * 1024 * 1024;
 
+/** Authed XHR returning the response text; 401 goes through the shared refresh, other non-2xx throw. */
 async function authedXhr(
   method: string,
   url: string,
   body: Blob | null,
-  extraHeaders?: Record<string, string>
-): Promise<{ status: number; text: string }> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(method, `${BASE}${url}`);
-    xhr.setRequestHeader("authorization", `Bearer ${tokens?.accessToken ?? ""}`);
-    if (body) xhr.setRequestHeader("content-type", "application/octet-stream");
-    for (const [k, v] of Object.entries(extraHeaders ?? {})) xhr.setRequestHeader(k, v);
-    xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
-    xhr.onerror = () => reject(new ApiError(0, "network error"));
-    xhr.send(body);
+  extraHeaders?: Record<string, string>,
+  failLabel?: string
+): Promise<string> {
+  const send = (): Promise<{ status: number; text: string }> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(method, `${BASE}${url}`);
+      xhr.setRequestHeader("authorization", `Bearer ${getAccessToken() ?? ""}`);
+      if (body) xhr.setRequestHeader("content-type", "application/octet-stream");
+      for (const [k, v] of Object.entries(extraHeaders ?? {})) xhr.setRequestHeader(k, v);
+      xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
+      xhr.onerror = () => reject(new ApiError(0, "network error"));
+      xhr.send(body);
+    });
+  return withAuthRetry(async () => {
+    const res = await send();
+    if (res.status === 401) return { auth: "failed", message: messageFromText(res.text) };
+    if (res.status < 200 || res.status >= 300) {
+      throw new ApiError(res.status, failLabel ? `${failLabel}: ${res.text}` : res.text);
+    }
+    return { auth: "ok", status: res.status, value: res.text };
   });
 }
 
@@ -214,13 +160,13 @@ async function uploadVersionChunked(
   for (let p = 1; p <= partsTotal; p++) {
     const slice = file.slice((p - 1) * PART_SIZE, p * PART_SIZE);
     const partSha = await sha256Hex(slice);
-    const res = await authedXhr(
+    await authedXhr(
       "PUT",
       `/models/${modelId}/uploads/${create.uploadId}/parts/${p}`,
       slice,
-      partSha ? { "x-part-sha256": partSha } : undefined
+      partSha ? { "x-part-sha256": partSha } : undefined,
+      `part ${p} upload failed`
     );
-    if (res.status !== 200) throw new ApiError(res.status, `part ${p} upload failed: ${res.text}`);
     onProgress?.(Math.round((p / partsTotal) * 100));
   }
   return api.post<{ version: { id: string; status: string } }>(
@@ -230,18 +176,12 @@ async function uploadVersionChunked(
 
 /** Authenticated binary download (e.g. GLB, meta.json, original IFC). */
 export async function downloadBinary(url: string): Promise<ArrayBuffer> {
-  const res = await rawRequest("GET", url);
-  if (res.status === 401 && tokens?.refreshToken) {
-    if (await refreshTokens()) {
-      const retry = await rawRequest("GET", url);
-      if (retry.ok) return retry.arrayBuffer();
-    } else {
-      clearTokens();
-      onUnauthorized?.();
-    }
-  }
-  if (!res.ok) throw new ApiError(res.status, `download failed: ${url}`);
-  return res.arrayBuffer();
+  return withAuthRetry(async () => {
+    const res = await rawRequest("GET", url);
+    if (res.status === 401) return { auth: "failed", message: await messageOf(res) };
+    if (!res.ok) throw new ApiError(res.status, `download failed: ${url}`);
+    return { auth: "ok", status: res.status, value: await res.arrayBuffer() };
+  });
 }
 
 /** Authenticated download saved via the browser. */
@@ -262,21 +202,24 @@ export async function importBcfZip(
 ): Promise<{ imported: number; skipped: number; version: string }> {
   const form = new FormData();
   form.append("file", file, file.name);
-  const res = await fetch(`${BASE}/projects/${projectId}/issues/import.bcfzip`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${tokens?.accessToken ?? ""}` },
-    body: form,
-  });
-  if (!res.ok) {
-    let msg = res.statusText;
-    try {
-      msg = (await res.json()).message ?? msg;
-    } catch {
-      /* keep */
+  return withAuthRetry(async () => {
+    const res = await fetch(`${BASE}/projects/${projectId}/issues/import.bcfzip`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${getAccessToken() ?? ""}` },
+      body: form,
+    });
+    if (res.status === 401) return { auth: "failed", message: await messageOf(res) };
+    if (!res.ok) {
+      let msg = res.statusText;
+      try {
+        msg = (await res.json()).message ?? msg;
+      } catch {
+        /* keep */
+      }
+      throw new ApiError(res.status, msg);
     }
-    throw new ApiError(res.status, msg);
-  }
-  return res.json();
+    return { auth: "ok", status: res.status, value: await res.json() };
+  });
 }
 
 export interface ClashHit {
@@ -347,20 +290,60 @@ export interface DiffResult {
 export const apiDiff = (versionAId: string, versionBId: string): Promise<DiffResult> =>
   api.get<DiffResult>(`/versions/${versionAId}/diff/${versionBId}`);
 
+/** Backoff between reconnect probes when the session state is unclear (network down). */
+const RECONNECT_BACKOFF_MS = 5000;
+
 /** Live version status/progress via SSE (token in query — EventSource cannot set headers). */
 export function subscribeVersions(
   ids: string[],
-  onUpdate: (update: { versionId: string; status: string; progress: number }) => void
+  onUpdate: (update: { versionId: string; status: string; progress: number }) => void,
+  opts?: { backoffMs?: number }
 ): () => void {
-  const accessToken = getAccessToken() ?? "";
-  const query = new URLSearchParams({ token: accessToken, ids: ids.join(",") });
-  const es = new EventSource(`${BASE}/versions/events?${query.toString()}`);
-  es.onmessage = (e) => {
+  const backoffMs = opts?.backoffMs ?? RECONNECT_BACKOFF_MS;
+  let closed = false;
+  let es: EventSource | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const connect = (): void => {
+    const query = new URLSearchParams({ token: getAccessToken() ?? "", ids: ids.join(",") });
+    es = new EventSource(`${BASE}/versions/events?${query.toString()}`);
+    es.onmessage = (e) => {
+      try {
+        onUpdate(JSON.parse(e.data));
+      } catch {
+        /* ignore malformed frames */
+      }
+    };
+    // The server validates the token only at connection time and returns 401
+    // for an expired one; EventSource then errors and never auto-reconnects
+    // (and a browser reconnect would replay the stale token anyway).
+    es.onerror = () => {
+      if (closed) return;
+      es?.close();
+      void reconnect();
+    };
+  };
+
+  // Probe the session through the shared protocol instead of guessing: a
+  // stale token is refreshed here (single-flight, once), a live token
+  // reconnects as-is (network blips spend no refresh), and a dead session is
+  // logged out by withAuthRetry and stops the loop.
+  const reconnect = async (): Promise<void> => {
+    if (closed) return;
     try {
-      onUpdate(JSON.parse(e.data));
-    } catch {
-      /* ignore malformed frames */
+      await api.get("/auth/me");
+      if (!closed) connect();
+    } catch (err) {
+      if (closed) return;
+      if (err instanceof ApiError && err.status === 401) return; // logged out
+      reconnectTimer = setTimeout(() => void reconnect(), backoffMs);
     }
   };
-  return () => es.close();
+
+  connect();
+  return () => {
+    closed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    es?.close();
+  };
 }
