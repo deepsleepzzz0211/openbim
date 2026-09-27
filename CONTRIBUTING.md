@@ -22,7 +22,7 @@
 
 ## 架构约束（改动前必读）
 
-- 转换逻辑只能放在 `packages/ifc`（纯库、可在 worker 运行），API 进程禁止加载 web-ifc。
+- 转换逻辑只能放在 `packages/ifc`（纯库、可在 worker 运行）。生产（worker 池模式）下 API 进程不得加载 web-ifc，WASM 留在 worker；`CONVERSION_MODE=inline`（测试 / 极小部署）是唯一例外。
 - `Version` 一经 READY 不可变；产物写入只允许经 `BlobStore`，key 由服务端生成。
 - 面向用户的错误一律走 fastify 错误处理（statusCode + message），不向客户端泄漏内部细节。
 

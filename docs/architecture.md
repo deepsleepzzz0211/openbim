@@ -160,7 +160,7 @@ glb node 约定：每 mesh `name = expressID 字符串`，`extras.storey = store
 ```
 
 - 内存防护：worker 接收的是 BlobStore 里的文件路径（不传大 buffer 给线程；线程内流读）。
-- 并发默认 `max(1, cpus-1)`，队列上限 8，超限 429。
+- 并发默认 `max(1, floor(cpus/2))`（`CONCURRENCY` 环境变量可覆盖，硬上限 8）；内存队列无界，不拒绝请求。
 - GUID：实现 RFC 4122 压缩 base64（字符表 `0-9A-Za-z_$`，见报告 02 §6），转换时从 web-ifc `GlobalId` 属性读取并校验。
 
 ## 6. 前端架构（apps/web）
